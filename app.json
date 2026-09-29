@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Horários IFNMG Januária",
+    "slug": "app-horarios",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "bundleIdentifier": "br.edu.ifnmg.januaria.horarios",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "br.edu.ifnmg.januaria.horarios",
+      "versionCode": 1,
+      "targetSdkVersion": 36,
+      "adaptiveIcon": {
+        "backgroundColor": "#092B22",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-sharing"
+    ]
+  }
+}
