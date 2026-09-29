@@ -27,6 +27,12 @@
     },
     "plugins": [
       "expo-sharing"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "8ed340b2-0d83-4a90-90b1-f4dea69a616b"
+      }
+    },
+    "owner": "pauloveloso"
   }
 }
