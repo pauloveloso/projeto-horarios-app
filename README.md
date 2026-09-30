@@ -10,6 +10,8 @@ Aplicativo móvel de consulta pública da grade acadêmica do IFNMG – Campus J
 - Layout de agenda otimizado para telas de celular.
 - Exportação da grade semanal em PDF pelo diálogo nativo de impressão, com opção de salvar como PDF.
 - Leitura direta das mesmas tabelas Supabase usadas pelo sistema web.
+- Cópia local das versões e horários acessados, com sincronização automática ao abrir o app com conexão.
+- Restauração da última consulta selecionada após fechar e reabrir o app.
 
 ## Configuração
 
@@ -29,6 +31,8 @@ Abra o QR code com Expo Go ou use `npm run android` / `npm run ios` em um ambien
 `versoes_grade` (somente `PUBLICADA`), `aulas`, `turmas`, `cursos`, `professores`, `disciplinas`, `espacos`, `categorias_espacos` e `slots_horarios`.
 
 O app não implementa login nem telas de gestão nesta primeira etapa. As credenciais do Supabase ficam em `.env`, ignorado pelo Git. A chave usada no app deve ser a publishable/anon key, nunca uma chave `service_role`.
+
+Os horários disponíveis offline são os das grades que já foram carregadas no dispositivo. Na primeira abertura, conecte o app à internet para salvar a grade. Quando há conexão, o app busca dados atualizados e substitui a cópia local apenas depois de carregar todas as tabelas com sucesso.
 
 ## Requisitos de desenvolvimento
 

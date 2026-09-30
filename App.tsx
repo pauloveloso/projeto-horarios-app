@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -16,6 +16,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Print from 'expo-print';
 import { supabase, supabaseConfigured } from './src/lib/supabase';
+import { lerBuscaSalva, lerGradeSalva, lerVersoesSalvas, salvarBusca, salvarGrade, salvarVersoes, type BuscaSalva } from './src/lib/offline-cache';
 
 type Filtro = 'TURMA' | 'PROFESSOR' | 'ESPACO';
 type Versao = { id: string; nome: string; semestre: string; status: string; data_inicio_vigencia: string };
@@ -25,6 +26,7 @@ type Dados = {
   disciplinas: Registro[]; espacos: Registro[]; categorias: Registro[]; slots: Registro[];
 };
 type Opcao = { id: string; titulo: string; detalhe?: string };
+type GradeSalva = { versao: Versao | null; dados: Dados };
 
 const DIAS = [
   { id: 'SEGUNDA', nome: 'Seg' }, { id: 'TERCA', nome: 'Ter' },
@@ -42,7 +44,16 @@ const hojeISO = () => {
 const hora = (valor?: string) => valor?.slice(0, 5) ?? '';
 const texto = (valor?: string | null) => valor?.trim() || '';
 const dataPt = (valor?: string) => valor ? valor.slice(0, 10).split('-').reverse().join('/') : '';
+const dataHoraPt = (valor?: string | null) => valor ? new Date(valor).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '';
 const escaparHtml = (valor: string) => valor.replace(/[&<>"']/g, (caractere) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[caractere] ?? caractere);
+
+const montarOpcoes = (filtro: Filtro, dados: Dados): Opcao[] => {
+  if (filtro === 'TURMA') {
+    return dados.cursos.flatMap((curso) => dados.turmas.filter((turma) => String(turma.curso_id) === String(curso.id)).map((turma) => ({ id: String(turma.id), titulo: texto(turma.codigo) || 'Turma', detalhe: texto(curso.nome) })));
+  }
+  if (filtro === 'PROFESSOR') return dados.professores.map((p) => ({ id: String(p.id), titulo: texto(p.nome) || 'Professor(a)' }));
+  return dados.categorias.flatMap((categoria) => dados.espacos.filter((espaco) => String(espaco.categoria_id) === String(categoria.id)).map((espaco) => ({ id: String(espaco.id), titulo: texto(espaco.nome) || 'Espaço', detalhe: texto(categoria.nome) })));
+};
 
 export default function App() {
   const [versoes, setVersoes] = useState<Versao[]>([]);
@@ -55,44 +66,123 @@ export default function App() {
   const [busca, setBusca] = useState('');
   const [carregandoVersoes, setCarregandoVersoes] = useState(true);
   const [carregandoGrade, setCarregandoGrade] = useState(false);
+  const [dadosCarregados, setDadosCarregados] = useState(false);
+  const [preferenciasCarregadas, setPreferenciasCarregadas] = useState(false);
+  const [buscaPendente, setBuscaPendente] = useState<BuscaSalva | null>(null);
+  const [ultimaAtualizacao, setUltimaAtualizacao] = useState<string | null>(null);
+  const [semConexao, setSemConexao] = useState(false);
+  const [sincronizando, setSincronizando] = useState(false);
   const [erro, setErro] = useState('');
   const [atualizando, setAtualizando] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   const [gerandoPdf, setGerandoPdf] = useState(false);
+  const ultimaVersaoRef = useRef('');
+  const versoesRef = useRef(versoes);
 
-  const carregarVersoes = useCallback(async () => {
+  useEffect(() => { versoesRef.current = versoes; }, [versoes]);
+
+  const carregarVersoes = useCallback(async (preferencia?: BuscaSalva | null) => {
     if (!supabaseConfigured) {
       setCarregandoVersoes(false);
       return;
     }
     setErro('');
-    const { data, error } = await supabase.from('versoes_grade').select('*').eq('status', 'PUBLICADA').order('data_inicio_vigencia', { ascending: false });
-    if (error) {
+    let publicadas: Versao[];
+    try {
+      const { data, error } = await supabase.from('versoes_grade').select('*').eq('status', 'PUBLICADA').order('data_inicio_vigencia', { ascending: false });
+      if (error) throw error;
+      publicadas = (data ?? []) as Versao[];
+    } catch {
+      setSemConexao(true);
       setErro('Não foi possível carregar as versões da grade. Verifique sua conexão e tente novamente.');
       setCarregandoVersoes(false);
       setAtualizando(false);
       return;
     }
-    const publicadas = (data ?? []) as Versao[];
+    try { await salvarVersoes(publicadas); } catch (falha) { console.warn('Não foi possível salvar as versões no dispositivo:', falha); }
     setVersoes(publicadas);
+    if (!publicadas.length) {
+      setDados(VAZIO);
+      setDadosCarregados(false);
+      setSelecionado(null);
+    }
     const atual = publicadas.find((v) => v.data_inicio_vigencia <= hojeISO()) ?? publicadas[0];
-    setVersaoId((anterior) => publicadas.some((v) => v.id === anterior) ? anterior : atual?.id ?? '');
+    setVersaoId((anterior) => publicadas.some((v) => String(v.id) === String(anterior)) ? anterior : publicadas.some((v) => String(v.id) === String(preferencia?.versaoId)) ? String(preferencia?.versaoId) : atual?.id ?? '');
     setCarregandoVersoes(false);
     setAtualizando(false);
   }, []);
 
-  useEffect(() => { void carregarVersoes(); }, [carregarVersoes]);
+  useEffect(() => {
+    let ativo = true;
+    const iniciar = async () => {
+      let versoesSalvas: { atualizadoEm: string; dados: Versao[] } | null = null;
+      let buscaSalva: BuscaSalva | null = null;
+      try {
+        [versoesSalvas, buscaSalva] = await Promise.all([lerVersoesSalvas<Versao>(), lerBuscaSalva()]);
+      } catch (falha) {
+        console.warn('Não foi possível ler os dados salvos no dispositivo:', falha);
+      }
+      if (!ativo) return;
+      setBuscaPendente(buscaSalva);
+      if (buscaSalva) setFiltro(buscaSalva.filtro);
+      if (versoesSalvas?.dados.length) {
+        setVersoes(versoesSalvas.dados);
+        setUltimaAtualizacao(versoesSalvas.atualizadoEm);
+        const preferida = versoesSalvas.dados.find((v) => String(v.id) === String(buscaSalva?.versaoId));
+        const atual = versoesSalvas.dados.find((v) => v.data_inicio_vigencia <= hojeISO()) ?? versoesSalvas.dados[0];
+        setVersaoId(String((preferida ?? atual)?.id ?? ''));
+      } else if (buscaSalva?.versaoId) {
+        setVersaoId(buscaSalva.versaoId);
+      }
+      setCarregandoVersoes(false);
+      setPreferenciasCarregadas(true);
+      if (supabaseConfigured) void carregarVersoes(buscaSalva);
+      else if (!versoesSalvas?.dados.length) setErro('Falta conectar o Supabase e ainda não há horários salvos neste dispositivo.');
+    };
+    void iniciar();
+    return () => { ativo = false; };
+  }, [carregarVersoes]);
 
   useEffect(() => {
-    if (!supabaseConfigured || !versaoId) {
-      setDados(VAZIO);
-      return;
+    if (!preferenciasCarregadas || !versaoId) return;
+    if (ultimaVersaoRef.current && ultimaVersaoRef.current !== versaoId) {
+      void salvarBusca({ filtro, opcaoId: null, versaoId });
     }
+    ultimaVersaoRef.current = versaoId;
+  }, [filtro, preferenciasCarregadas, versaoId]);
+
+  useEffect(() => {
+    if (!versaoId) return;
     let ativo = true;
     const carregar = async () => {
       setCarregandoGrade(true);
+      setDadosCarregados(false);
+      setDados(VAZIO);
+      setUltimaAtualizacao(null);
+      setSemConexao(false);
       setErro('');
-      const respostas = await Promise.all([
+      let cache: { atualizadoEm: string; dados: GradeSalva } | null = null;
+      try {
+        cache = await lerGradeSalva<GradeSalva>(versaoId);
+      } catch (falha) {
+        console.warn('Não foi possível ler a grade salva no dispositivo:', falha);
+      }
+      if (!ativo) return;
+      if (cache) {
+        setDados(cache.dados.dados);
+        setDadosCarregados(true);
+        setUltimaAtualizacao(cache.atualizadoEm);
+        setCarregandoGrade(false);
+        if (cache.dados.versao) setVersoes((anteriores) => anteriores.some((v) => String(v.id) === String(cache?.dados.versao?.id)) ? anteriores : [...anteriores, cache!.dados.versao!]);
+      }
+      if (!supabaseConfigured) {
+        if (!cache) setErro('Falta conectar o Supabase e ainda não há horários salvos para esta grade.');
+        setCarregandoGrade(false);
+        setSincronizando(false);
+        return;
+      }
+      setSincronizando(true);
+      const consultas = [
         supabase.from('aulas').select('*').eq('versao_id', versaoId).limit(5000),
         supabase.from('turmas').select('*').order('codigo').limit(2000),
         supabase.from('cursos').select('*').order('nome'),
@@ -101,28 +191,58 @@ export default function App() {
         supabase.from('espacos').select('*').order('nome').limit(1000),
         supabase.from('categorias_espacos').select('*').order('nome'),
         supabase.from('slots_horarios').select('*').order('hora_inicio'),
-      ]);
+      ];
+      const respostas = await Promise.all(consultas.map((consulta) => Promise.resolve(consulta).catch((falha: unknown) => ({ data: null, error: falha }))));
       if (!ativo) return;
       const falha = respostas.find((resposta) => resposta.error)?.error;
       if (falha) {
-        setErro('Não foi possível carregar os horários. Verifique o acesso público às tabelas no Supabase.');
+        setSemConexao(true);
+        setErro(cache ? '' : 'Não foi possível carregar os horários. Verifique sua conexão e tente novamente.');
       } else {
         const [aulas, turmas, cursos, professores, disciplinas, espacos, categorias, slots] = respostas.map((resposta) => resposta.data ?? []);
-        setDados({ aulas: aulas as Registro[], turmas: turmas as Registro[], cursos: cursos as Registro[], professores: professores as Registro[], disciplinas: disciplinas as Registro[], espacos: espacos as Registro[], categorias: categorias as Registro[], slots: slots as Registro[] });
+        const dadosNovos: Dados = { aulas: aulas as Registro[], turmas: turmas as Registro[], cursos: cursos as Registro[], professores: professores as Registro[], disciplinas: disciplinas as Registro[], espacos: espacos as Registro[], categorias: categorias as Registro[], slots: slots as Registro[] };
+        const versaoAtual = versoesRef.current.find((item) => String(item.id) === String(versaoId)) ?? cache?.dados.versao ?? null;
+        setDados(dadosNovos);
+        setDadosCarregados(true);
+        setSemConexao(false);
+        setErro('');
+        try {
+          const salvoEm = await salvarGrade(versaoId, { versao: versaoAtual, dados: dadosNovos });
+          setUltimaAtualizacao(salvoEm);
+        } catch (falhaCache) {
+          console.warn('Horários carregados, mas não foi possível salvá-los no dispositivo:', falhaCache);
+          setUltimaAtualizacao(new Date().toISOString());
+        }
       }
       setCarregandoGrade(false);
+      setSincronizando(false);
     };
     void carregar();
     return () => { ativo = false; };
   }, [versaoId, reloadToken]);
 
-  const opcoes = useMemo<Opcao[]>(() => {
-    if (filtro === 'TURMA') {
-      return dados.cursos.flatMap((curso) => dados.turmas.filter((turma) => String(turma.curso_id) === String(curso.id)).map((turma) => ({ id: String(turma.id), titulo: texto(turma.codigo) || 'Turma', detalhe: texto(curso.nome) })));
-    }
-    if (filtro === 'PROFESSOR') return dados.professores.map((p) => ({ id: String(p.id), titulo: texto(p.nome) || 'Professor(a)' }));
-    return dados.categorias.flatMap((categoria) => dados.espacos.filter((espaco) => String(espaco.categoria_id) === String(categoria.id)).map((espaco) => ({ id: String(espaco.id), titulo: texto(espaco.nome) || 'Espaço', detalhe: texto(categoria.nome) })));
-  }, [dados, filtro]);
+  const opcoes = useMemo<Opcao[]>(() => montarOpcoes(filtro, dados), [dados, filtro]);
+
+  useEffect(() => {
+    if (!preferenciasCarregadas || !dadosCarregados || !versaoId || !buscaPendente) return;
+    let ativo = true;
+    const restaurar = async () => {
+      await Promise.resolve();
+      if (!ativo) return;
+      if (String(buscaPendente.versaoId) !== String(versaoId)) {
+        setBuscaPendente(null);
+        return;
+      }
+      const opcao = buscaPendente.opcaoId ? montarOpcoes(buscaPendente.filtro, dados).find((item) => item.id === buscaPendente.opcaoId) ?? null : null;
+      setFiltro(buscaPendente.filtro);
+      setSelecionado(opcao);
+      setDia(diaAtualId());
+      setBuscaPendente(null);
+      if (!opcao && buscaPendente.opcaoId) void salvarBusca({ ...buscaPendente, opcaoId: null });
+    };
+    void restaurar();
+    return () => { ativo = false; };
+  }, [buscaPendente, dados, dadosCarregados, preferenciasCarregadas, versaoId]);
 
   const aulasSelecionadas = useMemo(() => dados.aulas.filter((aula) => {
     const campo = filtro === 'TURMA' ? aula.turma_id : filtro === 'PROFESSOR' ? aula.professor_id : aula.espaco_id;
@@ -134,7 +254,10 @@ export default function App() {
   const opcoesVisiveis = opcoes.filter((opcao) => `${opcao.titulo} ${opcao.detalhe ?? ''}`.toLocaleLowerCase('pt-BR').includes(busca.toLocaleLowerCase('pt-BR')));
 
   const escolherFiltro = (novo: Filtro) => { setFiltro(novo); setSelecionado(null); setDia(diaAtualId()); setBusca(''); };
-  const selecionarOpcao = (opcao: Opcao) => { setSelecionado(opcao); setDia(diaAtualId()); setModal(null); setBusca(''); };
+  const selecionarOpcao = (opcao: Opcao) => {
+    setSelecionado(opcao); setDia(diaAtualId()); setModal(null); setBusca('');
+    if (versaoId) void salvarBusca({ filtro, opcaoId: opcao.id, versaoId });
+  };
   const atualizar = () => { setAtualizando(true); setReloadToken((valor) => valor + 1); void carregarVersoes(); };
 
   const abrirSeletor = (qual: 'versao' | 'opcao') => { setBusca(''); setModal(qual); };
@@ -194,12 +317,13 @@ export default function App() {
       </View>
 
       <ScrollView style={styles.content} contentContainerStyle={styles.contentInner} keyboardShouldPersistTaps="handled" refreshControl={<RefreshControl refreshing={atualizando} onRefresh={atualizar} tintColor={colors.green700} colors={[colors.green700]} />}>
-        {!supabaseConfigured ? (
+        {!supabaseConfigured && !dadosCarregados ? (
           <View style={styles.noticeCard}><Text style={styles.noticeIcon}>⚙</Text><Text style={styles.noticeTitle}>Falta conectar o Supabase</Text><Text style={styles.noticeText}>Copie o arquivo .env.example para .env e preencha a URL e a chave pública do projeto. Depois reinicie o Expo.</Text></View>
-        ) : erro ? (
+        ) : erro && !dadosCarregados ? (
           <View style={styles.noticeCard}><Text style={styles.noticeIcon}>⌁</Text><Text style={styles.noticeTitle}>Não foi possível atualizar</Text><Text style={styles.noticeText}>{erro}</Text><Pressable style={styles.retryButton} onPress={atualizar}><Text style={styles.retryText}>Tentar novamente</Text></Pressable></View>
         ) : (
           <>
+            {dadosCarregados && (semConexao || sincronizando) && <View style={{ backgroundColor: '#e8f5ec', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 9, marginBottom: 14 }}><Text style={{ color: colors.green800, fontSize: 10, fontWeight: '700' }}>{semConexao ? `Sem conexão. Exibindo dados salvos em ${dataHoraPt(ultimaAtualizacao)}.` : 'Dados salvos no dispositivo. Verificando atualizações…'}</Text></View>}
             <View style={styles.sectionHeadingRow}><Text style={[styles.eyebrow, styles.quickEyebrow]}>CONSULTA RÁPIDA</Text><View style={styles.classCount}><Text style={styles.classCountNumber}>{aulasSelecionadas.length}</Text><Text style={styles.classCountLabel}>AULAS</Text></View></View>
             <View style={styles.filterRow}>
               {([{ id: 'TURMA', label: 'Turma' }, { id: 'PROFESSOR', label: 'Professor' }, { id: 'ESPACO', label: 'Espaço' }] as const).map((item) => <Pressable key={item.id} onPress={() => escolherFiltro(item.id)} style={[styles.filterChip, filtro === item.id && styles.filterChipActive]}><Text style={[styles.filterText, filtro === item.id && styles.filterTextActive]}>{item.label}</Text></Pressable>)}
@@ -210,7 +334,7 @@ export default function App() {
               <Text style={styles.selectChevron}>⌄</Text>
             </Pressable>
 
-            {carregandoVersoes || carregandoGrade ? <View style={styles.loading}><ActivityIndicator color={colors.green700} /><Text style={styles.loadingText}>Buscando horários atualizados…</Text></View> : !selecionado ? (
+            {(carregandoVersoes || carregandoGrade) && !dadosCarregados ? <View style={styles.loading}><ActivityIndicator color={colors.green700} /><Text style={styles.loadingText}>Buscando horários atualizados…</Text></View> : !selecionado ? (
               <View style={styles.emptyWelcome}><View style={styles.emptyIllustration}><Text style={styles.emptyEmoji}>▤</Text><View style={styles.emptySun} /></View><Text style={styles.emptyTitle}>Seu próximo horário começa aqui</Text><Text style={styles.emptyText}>Selecione uma turma, professor ou espaço para ver as aulas da semana.</Text></View>
             ) : (
               <>
