@@ -9,7 +9,12 @@ export type BuscaSalva = {
   filtro: 'TURMA' | 'PROFESSOR' | 'ESPACO';
   opcaoId: string | null;
   versaoId: string;
+  modulo?: ModuloConsulta;
 };
+
+export type ModuloConsulta = 'TODOS' | 'INTEGRAL' | 'MODULO_1' | 'MODULO_2' | 'MODULO_3';
+
+const MODULOS_VALIDOS: ModuloConsulta[] = ['TODOS', 'INTEGRAL', 'MODULO_1', 'MODULO_2', 'MODULO_3'];
 
 const CHAVE_VERSOES = 'app-horarios:versoes:v1';
 const CHAVE_BUSCA = 'app-horarios:ultima-busca:v1';
@@ -43,7 +48,7 @@ export async function lerBuscaSalva(): Promise<BuscaSalva | null> {
   try {
     const busca = JSON.parse(valor) as BuscaSalva;
     if (!busca.versaoId || !['TURMA', 'PROFESSOR', 'ESPACO'].includes(busca.filtro)) return null;
-    return busca;
+    return { ...busca, modulo: MODULOS_VALIDOS.includes(busca.modulo ?? 'TODOS') ? busca.modulo ?? 'TODOS' : 'TODOS' };
   } catch {
     await Storage.removeItem(CHAVE_BUSCA);
     return null;

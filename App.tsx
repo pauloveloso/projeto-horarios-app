@@ -17,7 +17,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Print from 'expo-print';
 import { supabase, supabaseConfigured } from './src/lib/supabase';
-import { lerBuscaSalva, lerGradeSalva, lerVersoesSalvas, salvarBusca, salvarGrade, salvarVersoes, type BuscaSalva } from './src/lib/offline-cache';
+import { lerBuscaSalva, lerGradeSalva, lerVersoesSalvas, salvarBusca, salvarGrade, salvarVersoes, type BuscaSalva, type ModuloConsulta } from './src/lib/offline-cache';
 
 type Filtro = 'TURMA' | 'PROFESSOR' | 'ESPACO';
 type Versao = { id: string; nome: string; semestre: string; status: string; data_inicio_vigencia: string };
@@ -28,6 +28,14 @@ type Dados = {
 };
 type Opcao = { id: string; titulo: string; detalhe?: string };
 type GradeSalva = { versao: Versao | null; dados: Dados };
+
+const OPCOES_MODULO: { id: ModuloConsulta; titulo: string; detalhe: string }[] = [
+  { id: 'TODOS', titulo: 'Todos os módulos', detalhe: 'Exibe aulas de todos os módulos e anuais' },
+  { id: 'INTEGRAL', titulo: 'Anual / Integral', detalhe: 'Exibe aulas sem divisão por módulo' },
+  { id: 'MODULO_1', titulo: 'Módulo 1', detalhe: '1º trimestre' },
+  { id: 'MODULO_2', titulo: 'Módulo 2', detalhe: '2º trimestre' },
+  { id: 'MODULO_3', titulo: 'Módulo 3', detalhe: '3º trimestre' },
+];
 
 const DIAS = [
   { id: 'SEGUNDA', nome: 'Seg' }, { id: 'TERCA', nome: 'Ter' },
@@ -49,6 +57,14 @@ const texto = (valor?: string | null) => valor?.trim() || '';
 const dataPt = (valor?: string) => valor ? valor.slice(0, 10).split('-').reverse().join('/') : '';
 const dataHoraPt = (valor?: string | null) => valor ? new Date(valor).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '';
 const escaparHtml = (valor: string) => valor.replace(/[&<>"']/g, (caractere) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[caractere] ?? caractere);
+const versaoPrevia = (lista: Versao[]) => lista
+  .filter((item) => item.status === 'PUBLICADA' && item.data_inicio_vigencia > hojeISO())
+  .sort((a, b) => a.data_inicio_vigencia.localeCompare(b.data_inicio_vigencia))[0];
+const versaoVigente = (lista: Versao[]) => lista
+  .filter((item) => item.status === 'PUBLICADA' && item.data_inicio_vigencia <= hojeISO())
+  .sort((a, b) => b.data_inicio_vigencia.localeCompare(a.data_inicio_vigencia))[0];
+const moduloLabel = (id: string) => OPCOES_MODULO.find((item) => item.id === id)?.titulo ?? 'Todos os módulos';
+const moduloCurto = (id: string) => id === 'TODOS' ? 'Todos' : id === 'INTEGRAL' ? 'Anual' : `Mód. ${id.slice(-1)}`;
 
 const montarOpcoes = (filtro: Filtro, dados: Dados): Opcao[] => {
   if (filtro === 'TURMA') {
@@ -64,8 +80,9 @@ export default function App() {
   const [dados, setDados] = useState<Dados>(VAZIO);
   const [filtro, setFiltro] = useState<Filtro>('TURMA');
   const [selecionado, setSelecionado] = useState<Opcao | null>(null);
+  const [modulo, setModulo] = useState<ModuloConsulta>('TODOS');
   const [dia, setDia] = useState(diaAtualId);
-  const [modal, setModal] = useState<'versao' | 'opcao' | null>(null);
+  const [modal, setModal] = useState<'versao' | 'opcao' | 'modulo' | null>(null);
   const [busca, setBusca] = useState('');
   const [carregandoVersoes, setCarregandoVersoes] = useState(true);
   const [carregandoGrade, setCarregandoGrade] = useState(false);
@@ -84,7 +101,7 @@ export default function App() {
 
   useEffect(() => { versoesRef.current = versoes; }, [versoes]);
 
-  const carregarVersoes = useCallback(async (preferencia?: BuscaSalva | null) => {
+  const carregarVersoes = useCallback(async (priorizarPrevia = false) => {
     if (!supabaseConfigured) {
       setCarregandoVersoes(false);
       return;
@@ -109,8 +126,8 @@ export default function App() {
       setDadosCarregados(false);
       setSelecionado(null);
     }
-    const atual = publicadas.find((v) => v.data_inicio_vigencia <= hojeISO()) ?? publicadas[0];
-    setVersaoId((anterior) => publicadas.some((v) => String(v.id) === String(anterior)) ? anterior : publicadas.some((v) => String(v.id) === String(preferencia?.versaoId)) ? String(preferencia?.versaoId) : atual?.id ?? '');
+    const padrao = versaoPrevia(publicadas) ?? versaoVigente(publicadas) ?? publicadas[0];
+    setVersaoId((anterior) => !priorizarPrevia && publicadas.some((v) => String(v.id) === String(anterior)) ? anterior : padrao?.id ?? '');
     setCarregandoVersoes(false);
     setAtualizando(false);
   }, []);
@@ -131,15 +148,14 @@ export default function App() {
       if (versoesSalvas?.dados.length) {
         setVersoes(versoesSalvas.dados);
         setUltimaAtualizacao(versoesSalvas.atualizadoEm);
-        const preferida = versoesSalvas.dados.find((v) => String(v.id) === String(buscaSalva?.versaoId));
-        const atual = versoesSalvas.dados.find((v) => v.data_inicio_vigencia <= hojeISO()) ?? versoesSalvas.dados[0];
-        setVersaoId(String((preferida ?? atual)?.id ?? ''));
+        const padrao = versaoPrevia(versoesSalvas.dados) ?? versaoVigente(versoesSalvas.dados) ?? versoesSalvas.dados[0];
+        setVersaoId(String(padrao?.id ?? buscaSalva?.versaoId ?? ''));
       } else if (buscaSalva?.versaoId) {
         setVersaoId(buscaSalva.versaoId);
       }
       setCarregandoVersoes(false);
       setPreferenciasCarregadas(true);
-      if (supabaseConfigured) void carregarVersoes(buscaSalva);
+      if (supabaseConfigured) void carregarVersoes(true);
       else if (!versoesSalvas?.dados.length) setErro('Falta conectar o Supabase e ainda não há horários salvos neste dispositivo.');
     };
     void iniciar();
@@ -148,11 +164,11 @@ export default function App() {
 
   useEffect(() => {
     if (!preferenciasCarregadas || !versaoId) return;
-    if (ultimaVersaoRef.current && ultimaVersaoRef.current !== versaoId) {
-      void salvarBusca({ filtro, opcaoId: null, versaoId });
+    if (ultimaVersaoRef.current && ultimaVersaoRef.current !== versaoId && !buscaPendente) {
+      void salvarBusca({ filtro, opcaoId: null, versaoId, modulo: 'TODOS' });
     }
     ultimaVersaoRef.current = versaoId;
-  }, [filtro, preferenciasCarregadas, versaoId]);
+  }, [buscaPendente, filtro, preferenciasCarregadas, versaoId]);
 
   useEffect(() => {
     if (!versaoId) return;
@@ -232,38 +248,66 @@ export default function App() {
     const restaurar = async () => {
       await Promise.resolve();
       if (!ativo) return;
-      if (String(buscaPendente.versaoId) !== String(versaoId)) {
-        setBuscaPendente(null);
-        return;
-      }
       const opcao = buscaPendente.opcaoId ? montarOpcoes(buscaPendente.filtro, dados).find((item) => item.id === buscaPendente.opcaoId) ?? null : null;
       setFiltro(buscaPendente.filtro);
+      setModulo(buscaPendente.modulo ?? 'TODOS');
       setSelecionado(opcao);
       setDia(diaAtualId());
       setBuscaPendente(null);
-      if (!opcao && buscaPendente.opcaoId) void salvarBusca({ ...buscaPendente, opcaoId: null });
+      if (String(buscaPendente.versaoId) !== String(versaoId) || (!opcao && buscaPendente.opcaoId)) {
+        void salvarBusca({ ...buscaPendente, opcaoId: opcao?.id ?? null, versaoId });
+      }
     };
     void restaurar();
     return () => { ativo = false; };
   }, [buscaPendente, dados, dadosCarregados, preferenciasCarregadas, versaoId]);
 
+  const turmaSelecionada = filtro === 'TURMA' && selecionado
+    ? dados.turmas.find((turma) => String(turma.id) === selecionado.id)
+    : null;
+  const cursoDaTurma = turmaSelecionada
+    ? dados.cursos.find((curso) => String(curso.id) === String(turmaSelecionada.curso_id))
+    : null;
+  const integradaSelecionada = String(cursoDaTurma?.modalidade ?? '').toUpperCase() === 'INTEGRADO';
+  const habilitarFiltroModulo = filtro !== 'TURMA' || integradaSelecionada;
   const aulasSelecionadas = useMemo(() => dados.aulas.filter((aula) => {
     const campo = filtro === 'TURMA' ? aula.turma_id : filtro === 'PROFESSOR' ? aula.professor_id : aula.espaco_id;
-    return selecionado && String(campo) === selecionado.id;
-  }), [dados.aulas, filtro, selecionado]);
+    if (!selecionado || String(campo) !== selecionado.id) return false;
+    if (!habilitarFiltroModulo || modulo === 'TODOS') return true;
+    const moduloAula = String(aula.modulo ?? 'INTEGRAL');
+    if (modulo === 'INTEGRAL') return moduloAula === 'INTEGRAL';
+    return moduloAula === modulo || moduloAula === 'INTEGRAL';
+  }), [dados.aulas, filtro, habilitarFiltroModulo, modulo, selecionado]);
   const slotsOcupados = useMemo(() => new Set(aulasSelecionadas.map((aula) => String(aula.slot_horario_id))), [aulasSelecionadas]);
   const slotsDoDia = useMemo(() => dados.slots.filter((slot) => slotsOcupados.has(String(slot.id)) && aulasSelecionadas.some((aula) => aula.dia_semana === dia && String(aula.slot_horario_id) === String(slot.id))), [aulasSelecionadas, dados.slots, dia, slotsOcupados]);
   const versao = versoes.find((item) => String(item.id) === String(versaoId));
+  const vigente = versaoVigente(versoes);
+  const ehPrevia = versao?.status === 'PUBLICADA' && versao.data_inicio_vigencia > hojeISO();
   const opcoesVisiveis = opcoes.filter((opcao) => `${opcao.titulo} ${opcao.detalhe ?? ''}`.toLocaleLowerCase('pt-BR').includes(busca.toLocaleLowerCase('pt-BR')));
 
-  const escolherFiltro = (novo: Filtro) => { setFiltro(novo); setSelecionado(null); setDia(diaAtualId()); setBusca(''); };
+  const escolherFiltro = (novo: Filtro) => { setFiltro(novo); setSelecionado(null); setModulo('TODOS'); setDia(diaAtualId()); setBusca(''); };
   const selecionarOpcao = (opcao: Opcao) => {
-    setSelecionado(opcao); setDia(diaAtualId()); setModal(null); setBusca('');
-    if (versaoId) void salvarBusca({ filtro, opcaoId: opcao.id, versaoId });
+    const turma = filtro === 'TURMA' ? dados.turmas.find((item) => String(item.id) === opcao.id) : null;
+    const curso = turma ? dados.cursos.find((item) => String(item.id) === String(turma.curso_id)) : null;
+    const moduloEscolhido = filtro === 'TURMA' && String(curso?.modalidade ?? '').toUpperCase() !== 'INTEGRADO' ? 'TODOS' : modulo;
+    setSelecionado(opcao); setModulo(moduloEscolhido); setDia(diaAtualId()); setModal(null); setBusca('');
+    if (versaoId) void salvarBusca({ filtro, opcaoId: opcao.id, versaoId, modulo: moduloEscolhido });
+  };
+  const selecionarModulo = (valor: ModuloConsulta) => {
+    setModulo(valor); setModal(null);
+    if (versaoId) void salvarBusca({ filtro, opcaoId: selecionado?.id ?? null, versaoId, modulo: valor });
+  };
+  const trocarParaVersaoVigente = () => {
+    if (!vigente) return;
+    const buscaAtual: BuscaSalva = { filtro, opcaoId: selecionado?.id ?? null, versaoId: String(vigente.id), modulo };
+    setBuscaPendente(buscaAtual);
+    setSelecionado(null);
+    setVersaoId(String(vigente.id));
+    void salvarBusca(buscaAtual);
   };
   const atualizar = () => { setAtualizando(true); setReloadToken((valor) => valor + 1); void carregarVersoes(); };
 
-  const abrirSeletor = (qual: 'versao' | 'opcao') => { setBusca(''); setModal(qual); };
+  const abrirSeletor = (qual: 'versao' | 'opcao' | 'modulo') => { setBusca(''); setModal(qual); };
   const abrirPoliticaPrivacidade = async () => {
     try {
       await Linking.openURL(URL_POLITICA_PRIVACIDADE);
@@ -287,7 +331,7 @@ export default function App() {
             const professor = dados.professores.find((registro) => String(registro.id) === String(aula.professor_id));
             const espaco = dados.espacos.find((registro) => String(registro.id) === String(aula.espaco_id));
             const turma = dados.turmas.find((registro) => String(registro.id) === String(aula.turma_id));
-            const detalhes = [filtro !== 'TURMA' ? texto(turma?.codigo) : '', filtro !== 'PROFESSOR' ? texto(professor?.nome) || 'Professor a definir' : '', filtro !== 'ESPACO' ? texto(espaco?.nome) || 'Espaço não informado' : ''].filter(Boolean).map(escaparHtml).join('<br>');
+            const detalhes = [filtro !== 'TURMA' ? texto(turma?.codigo) : '', filtro !== 'PROFESSOR' ? texto(professor?.nome) || 'Professor a definir' : '', filtro !== 'ESPACO' ? texto(espaco?.nome) || 'Espaço não informado' : '', habilitarFiltroModulo ? moduloLabel(String(aula.modulo ?? 'INTEGRAL')) : ''].filter(Boolean).map(escaparHtml).join('<br>');
             return `<div class="aula"><strong>${escaparHtml(texto(disciplina?.nome) || 'Disciplina')}</strong>${detalhes ? `<small>${detalhes}</small>` : ''}</div>`;
           }).join('');
           return `<td>${conteudo}</td>`;
@@ -295,7 +339,8 @@ export default function App() {
         return `<tr><th class="hora">${hora(slot.hora_inicio)}<br><small>${hora(slot.hora_fim)}</small></th>${celulas}</tr>`;
       }).join('');
       const rotuloFiltro = filtro === 'TURMA' ? 'Turma' : filtro === 'PROFESSOR' ? 'Professor(a)' : 'Espaço';
-      const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><style>@page{size:landscape;margin:12mm}body{font-family:Arial,sans-serif;color:#17251e}h1{text-align:center;font-size:19px;margin:0 0 5px}p{text-align:center;color:#53635a;font-size:11px;margin:0 0 16px}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{border:1px solid #829188;padding:5px;vertical-align:top;font-size:9px}thead th{background:#e7f2e9;text-align:center}.hora{width:58px;background:#f1f4f1;text-align:center}.aula{margin:2px 0 4px;padding:4px;border-left:2px solid #24734f;background:#f6faf7}.aula small{display:block;color:#52645a;font-size:8px;line-height:1.35;margin-top:2px}</style></head><body><h1>IFNMG — Campus Januária · Quadro de Horário</h1><p>${escaparHtml(rotuloFiltro)}: ${escaparHtml(selecionado.titulo)} · ${escaparHtml(versao?.nome ?? '')} · Vigência: ${dataPt(versao?.data_inicio_vigencia)}</p><table><thead><tr><th class="hora">HORÁRIO</th>${cabecalhoDias}</tr></thead><tbody>${linhas}</tbody></table></body></html>`;
+      const rotuloModulo = habilitarFiltroModulo ? ` · ${moduloLabel(modulo)}` : '';
+      const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><style>@page{size:landscape;margin:12mm}body{font-family:Arial,sans-serif;color:#17251e}h1{text-align:center;font-size:19px;margin:0 0 5px}p{text-align:center;color:#53635a;font-size:11px;margin:0 0 16px}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{border:1px solid #829188;padding:5px;vertical-align:top;font-size:9px}thead th{background:#e7f2e9;text-align:center}.hora{width:58px;background:#f1f4f1;text-align:center}.aula{margin:2px 0 4px;padding:4px;border-left:2px solid #24734f;background:#f6faf7}.aula small{display:block;color:#52645a;font-size:8px;line-height:1.35;margin-top:2px}</style></head><body><h1>IFNMG — Campus Januária · Quadro de Horário</h1><p>${escaparHtml(rotuloFiltro)}: ${escaparHtml(selecionado.titulo)}${escaparHtml(rotuloModulo)} · ${escaparHtml(versao?.nome ?? '')} · Vigência: ${dataPt(versao?.data_inicio_vigencia)}</p><table><thead><tr><th class="hora">HORÁRIO</th>${cabecalhoDias}</tr></thead><tbody>${linhas}</tbody></table></body></html>`;
       etapa = 'abrir a impressão';
       await Print.printAsync({ html, width: 792, height: 612, orientation: Print.Orientation.landscape });
     } catch (erro) {
@@ -337,18 +382,22 @@ export default function App() {
             <View style={styles.sectionHeadingRow}><Text style={[styles.eyebrow, styles.quickEyebrow]}>CONSULTA RÁPIDA</Text><View style={styles.classCount}><Text style={styles.classCountNumber}>{aulasSelecionadas.length}</Text><Text style={styles.classCountLabel}>AULAS</Text></View></View>
             <View style={styles.filterRow}>
               {([{ id: 'TURMA', label: 'Turma' }, { id: 'PROFESSOR', label: 'Professor' }, { id: 'ESPACO', label: 'Espaço' }] as const).map((item) => <Pressable key={item.id} onPress={() => escolherFiltro(item.id)} style={[styles.filterChip, filtro === item.id && styles.filterChipActive]}><Text style={[styles.filterText, filtro === item.id && styles.filterTextActive]}>{item.label}</Text></Pressable>)}
+              {habilitarFiltroModulo && <Pressable accessibilityRole="button" accessibilityLabel={`Módulo da consulta: ${moduloLabel(modulo)}`} style={styles.moduleChip} onPress={() => abrirSeletor('modulo')}><Text style={styles.moduleChipLabel}>MÓD.</Text><Text style={styles.moduleChipValue} numberOfLines={1}>{moduloCurto(modulo)}</Text><Text style={styles.moduleChipChevron}>⌄</Text></Pressable>}
             </View>
             <Pressable style={styles.selectButton} onPress={() => abrirSeletor('opcao')}>
               <View style={styles.selectIcon}><Text style={styles.selectIconText}>{filtro === 'TURMA' ? '▦' : filtro === 'PROFESSOR' ? '◉' : '⌂'}</Text></View>
               <View style={styles.selectCopy}><Text style={styles.selectLabel}>{selecionado ? filtro === 'TURMA' ? 'TURMA SELECIONADA' : filtro === 'PROFESSOR' ? 'PROFESSOR(A) SELECIONADO(A)' : 'ESPAÇO SELECIONADO' : 'SELECIONE PARA CONSULTAR'}</Text><Text style={[styles.selectValue, !selecionado && styles.selectPlaceholder]} numberOfLines={1}>{selecionado?.titulo ?? 'Escolha uma opção'}</Text></View>
               <Text style={styles.selectChevron}>⌄</Text>
             </Pressable>
-
             {(carregandoVersoes || carregandoGrade) && !dadosCarregados ? <View style={styles.loading}><ActivityIndicator color={colors.green700} /><Text style={styles.loadingText}>Buscando horários atualizados…</Text></View> : !selecionado ? (
               <View style={styles.emptyWelcome}><View style={styles.emptyIllustration}><Text style={styles.emptyEmoji}>▤</Text><View style={styles.emptySun} /></View><Text style={styles.emptyTitle}>Seu próximo horário começa aqui</Text><Text style={styles.emptyText}>Selecione uma turma, professor ou espaço para ver as aulas da semana.</Text></View>
             ) : (
               <>
                 <View style={styles.scheduleHeading}><View><Text style={styles.eyebrow}>GRADE SEMANAL</Text><Text style={styles.scheduleTitle}>{selecionado.titulo}</Text><Text style={styles.scheduleSub}>{selecionado.detalhe ? `${selecionado.detalhe} · ` : ''}Vigência: {dataPt(versao?.data_inicio_vigencia)}</Text></View><View style={styles.calendarIcon}><Text style={styles.calendarGlyph}>▦</Text></View></View>
+                {ehPrevia && <View style={styles.previewBanner}>
+                  <View style={styles.previewCopy}><Text style={styles.previewTitle}>⚠ PRÉVIA — Horários ainda não vigentes</Text><Text style={styles.previewText}>Entra em vigor em: {dataPt(versao?.data_inicio_vigencia)}</Text></View>
+                  {vigente && <Pressable onPress={trocarParaVersaoVigente} style={styles.previewButton}><Text style={styles.previewButtonText}>Ver horários vigentes</Text></Pressable>}
+                </View>}
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.dayRow}>{DIAS.map((item) => { const ativo = dia === item.id; const total = aulasSelecionadas.filter((aula) => aula.dia_semana === item.id).length; return <Pressable key={item.id} onPress={() => setDia(item.id)} style={[styles.dayChip, ativo && styles.dayChipActive]}><Text style={[styles.dayText, ativo && styles.dayTextActive]}>{item.nome}</Text><Text style={[styles.dayNumber, ativo && styles.dayNumberActive]}>{total}</Text></Pressable>; })}</ScrollView>
                 <Pressable style={[styles.pdfButton, gerandoPdf && styles.pdfButtonBusy]} onPress={gerarPdfGrade} disabled={gerandoPdf || !aulasSelecionadas.length}><Text style={styles.pdfGlyph}>{gerandoPdf ? '…' : '⇩'}</Text><Text style={styles.pdfButtonText}>{gerandoPdf ? 'Preparando PDF…' : 'Gerar PDF da grade semanal'}</Text></Pressable>
                 {slotsDoDia.length === 0 ? <View style={styles.emptyDay}><Text style={styles.emptyDayIcon}>☼</Text><Text style={styles.emptyDayTitle}>Dia livre</Text><Text style={styles.emptyDayText}>Não há aulas para {DIAS.find((item) => item.id === dia)?.nome.toLowerCase()} nesta seleção.</Text></View> : slotsDoDia.map((slot) => {
@@ -359,7 +408,7 @@ export default function App() {
                     const professor = dados.professores.find((item) => String(item.id) === String(aula.professor_id));
                     const espaco = dados.espacos.find((item) => String(item.id) === String(aula.espaco_id));
                     const turma = dados.turmas.find((item) => String(item.id) === String(aula.turma_id));
-                    return <View key={String(aula.id)} style={styles.classCard}><View style={styles.classCardTop}><View style={styles.subjectDot} /><Text style={styles.subjectName}>{texto(disciplina?.nome) || 'Disciplina'}</Text></View>{filtro !== 'TURMA' && <Text style={styles.classMeta}>▦  {texto(turma?.codigo) || 'Turma'}</Text>}{filtro !== 'PROFESSOR' && <Text style={styles.classMeta}>◉  {texto(professor?.nome) || 'Professor a definir'}</Text>}{filtro !== 'ESPACO' && <Text style={styles.classMeta}>⌂  {texto(espaco?.nome) || 'Espaço não informado'}</Text>}</View>;
+                    return <View key={String(aula.id)} style={styles.classCard}><View style={styles.classCardTop}><View style={styles.subjectDot} /><Text style={styles.subjectName}>{texto(disciplina?.nome) || 'Disciplina'}</Text></View>{habilitarFiltroModulo && filtro === 'TURMA' && <Text style={styles.classModule}>◷  {moduloLabel(String(aula.modulo ?? 'INTEGRAL'))}</Text>}{filtro !== 'TURMA' && <View style={styles.classMetaRow}><Text style={styles.classMeta}>▦  {texto(turma?.codigo) || 'Turma'}</Text>{habilitarFiltroModulo && <Text style={styles.classModuleInline}>({moduloCurto(String(aula.modulo ?? 'INTEGRAL'))})</Text>}</View>}{filtro !== 'PROFESSOR' && <Text style={styles.classMeta}>◉  {texto(professor?.nome) || 'Professor a definir'}</Text>}{filtro !== 'ESPACO' && <Text style={styles.classMeta}>⌂  {texto(espaco?.nome) || 'Espaço não informado'}</Text>}</View>;
                   })}</View></View>;
                 })}
               </>
@@ -370,9 +419,9 @@ export default function App() {
       </ScrollView>
 
       <Modal transparent visible={modal !== null} animationType="slide" onRequestClose={() => setModal(null)}>
-        <View style={styles.modalBackdrop}><Pressable style={StyleSheet.absoluteFill} onPress={() => setModal(null)} /><View style={styles.sheet}><View style={styles.sheetHandle} /><View style={styles.sheetTitleRow}><View><Text style={styles.eyebrow}>{modal === 'versao' ? 'GRADE ACADÊMICA' : 'CONSULTA DE HORÁRIOS'}</Text><Text style={styles.sheetTitle}>{modal === 'versao' ? 'Escolha a versão' : filtro === 'TURMA' ? 'Escolha uma turma' : filtro === 'PROFESSOR' ? 'Escolha um professor' : 'Escolha um espaço'}</Text></View><Pressable onPress={() => setModal(null)} style={styles.closeButton}><Text style={styles.closeText}>×</Text></Pressable></View>
+        <View style={styles.modalBackdrop}><Pressable style={StyleSheet.absoluteFill} onPress={() => setModal(null)} /><View style={styles.sheet}><View style={styles.sheetHandle} /><View style={styles.sheetTitleRow}><View><Text style={styles.eyebrow}>{modal === 'versao' ? 'GRADE ACADÊMICA' : modal === 'modulo' ? 'FILTRO DA CONSULTA' : 'CONSULTA DE HORÁRIOS'}</Text><Text style={styles.sheetTitle}>{modal === 'versao' ? 'Escolha a versão' : modal === 'modulo' ? 'Escolha o módulo' : filtro === 'TURMA' ? 'Escolha uma turma' : filtro === 'PROFESSOR' ? 'Escolha um professor' : 'Escolha um espaço'}</Text></View><Pressable onPress={() => setModal(null)} style={styles.closeButton}><Text style={styles.closeText}>×</Text></Pressable></View>
           {modal === 'opcao' && <TextInput value={busca} onChangeText={setBusca} placeholder={filtro === 'TURMA' ? 'Buscar turma ou curso' : filtro === 'PROFESSOR' ? 'Buscar professor' : 'Buscar espaço'} placeholderTextColor={colors.muted} style={styles.searchInput} autoCorrect={false} />}
-          <FlatList data={modal === 'versao' ? versoes.map((item) => ({ id: String(item.id), titulo: `${item.nome} · Vigência ${dataPt(item.data_inicio_vigencia)}`, detalhe: item.data_inicio_vigencia > hojeISO() ? 'Prévia' : item.status === 'PUBLICADA' ? 'Publicada' : '' })) : opcoesVisiveis} keyExtractor={(item) => item.id} keyboardShouldPersistTaps="handled" ListEmptyComponent={<Text style={styles.listEmpty}>{modal === 'versao' ? 'Nenhuma grade publicada.' : 'Nenhuma opção encontrada.'}</Text>} renderItem={({ item }) => <Pressable onPress={() => { if (modal === 'versao') { setVersaoId(item.id); setSelecionado(null); setDia(diaAtualId()); setModal(null); } else selecionarOpcao(item); }} style={styles.optionRow}><View style={styles.optionCopy}><Text style={styles.optionTitle}>{item.titulo}</Text>{item.detalhe ? <Text style={styles.optionDetail}>{item.detalhe}</Text> : null}</View><Text style={styles.optionArrow}>›</Text></Pressable>} />
+          <FlatList data={modal === 'versao' ? versoes.map((item) => ({ id: String(item.id), titulo: `${item.nome} · Vigência ${dataPt(item.data_inicio_vigencia)}`, detalhe: item.data_inicio_vigencia > hojeISO() ? 'Prévia' : item.status === 'PUBLICADA' ? 'Publicada' : '' })) : modal === 'modulo' ? OPCOES_MODULO : opcoesVisiveis} keyExtractor={(item) => item.id} keyboardShouldPersistTaps="handled" ListEmptyComponent={<Text style={styles.listEmpty}>{modal === 'versao' ? 'Nenhuma grade publicada.' : 'Nenhuma opção encontrada.'}</Text>} renderItem={({ item }) => <Pressable onPress={() => { if (modal === 'versao') { setBuscaPendente(null); setVersaoId(item.id); setSelecionado(null); setModulo('TODOS'); setDia(diaAtualId()); setModal(null); } else if (modal === 'modulo') selecionarModulo(item.id as ModuloConsulta); else selecionarOpcao(item); }} style={styles.optionRow}><View style={styles.optionCopy}><Text style={styles.optionTitle}>{item.titulo}</Text>{item.detalhe ? <Text style={styles.optionDetail}>{item.detalhe}</Text> : null}</View><Text style={styles.optionArrow}>›</Text></Pressable>} />
         </View></View>
       </Modal>
     </SafeAreaView>
@@ -381,10 +430,17 @@ export default function App() {
 
 const colors = { green950: '#092b22', green900: '#103d30', green800: '#15533e', green700: '#1c7252', green600: '#2c946b', mint: '#d9f5e7', ink: '#14261f', muted: '#7d8c85', canvas: '#f4f7f4', border: '#e6ece7', white: '#ffffff' };
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.canvas }, header: { backgroundColor: colors.green950, paddingHorizontal: 22, paddingTop: 14, paddingBottom: 22, borderBottomLeftRadius: 26, borderBottomRightRadius: 26 }, brandLine: { flexDirection: 'row', alignItems: 'center' }, brandMark: { width: 38, height: 38, borderRadius: 13, backgroundColor: '#c6f1dc', alignItems: 'center', justifyContent: 'center' }, brandMarkText: { color: colors.green900, fontSize: 21, fontWeight: '900' }, brandCopy: { marginLeft: 10, flex: 1 }, brandTitle: { color: colors.white, fontSize: 14, fontWeight: '900', letterSpacing: 1.4 }, brandSubtitle: { color: '#a6c8b9', fontSize: 9, fontWeight: '700', letterSpacing: 1.1, marginTop: 2 }, liveBadge: { borderColor: '#3e6959', borderWidth: 1, borderRadius: 20, paddingVertical: 6, paddingHorizontal: 9, flexDirection: 'row', alignItems: 'center', gap: 5 }, liveDot: { width: 6, height: 6, borderRadius: 4, backgroundColor: '#71e0a8' }, liveText: { color: '#c7ead8', fontSize: 8, fontWeight: '800', letterSpacing: 0.8 }, headerHeading: { marginTop: 25, color: colors.white, fontSize: 25, fontWeight: '800', letterSpacing: -0.6 }, headerDescription: { marginTop: 5, color: '#b2cfc1', fontSize: 12 }, versionButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 20, paddingHorizontal: 14, paddingVertical: 11, borderRadius: 14, backgroundColor: '#174637', borderWidth: 1, borderColor: '#2b604e' }, versionLabel: { color: '#8fbaa6', fontSize: 8, fontWeight: '800', letterSpacing: 1.1 }, versionName: { color: colors.white, fontSize: 12, fontWeight: '700', marginTop: 4 }, chevron: { color: '#a9cfbb', fontSize: 20 }, content: { flex: 1 }, contentInner: { paddingHorizontal: 20, paddingTop: 23, paddingBottom: 22 }, sectionHeadingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' }, eyebrow: { color: colors.green700, fontSize: 9, fontWeight: '900', letterSpacing: 1.2 }, sectionTitle: { color: colors.ink, fontSize: 19, fontWeight: '800', marginTop: 4 }, classCount: { alignItems: 'center', minWidth: 48, paddingVertical: 6, paddingHorizontal: 9, backgroundColor: '#e4f3e9', borderRadius: 12 }, classCountNumber: { color: colors.green800, fontSize: 15, fontWeight: '900' }, classCountLabel: { color: colors.green700, fontSize: 7, fontWeight: '800', letterSpacing: 0.8 }, filterRow: { flexDirection: 'row', gap: 8, marginTop: 17 }, filterChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 22, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border }, filterChipActive: { backgroundColor: colors.green800, borderColor: colors.green800 }, filterText: { color: '#617169', fontSize: 11, fontWeight: '700' }, filterTextActive: { color: colors.white }, selectButton: { backgroundColor: colors.white, marginTop: 11, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center' }, selectIcon: { width: 39, height: 39, backgroundColor: '#e8f5ec', borderRadius: 12, justifyContent: 'center', alignItems: 'center' }, selectIconText: { color: colors.green700, fontSize: 20, fontWeight: '800' }, selectCopy: { flex: 1, marginLeft: 11 }, selectLabel: { color: colors.muted, fontSize: 8, fontWeight: '800', letterSpacing: 0.8 }, selectValue: { color: colors.ink, fontSize: 13, fontWeight: '800', marginTop: 4 }, selectPlaceholder: { color: '#87958e', fontWeight: '600' }, selectChevron: { color: colors.green700, fontSize: 20, paddingHorizontal: 3 }, loading: { alignItems: 'center', paddingVertical: 50, gap: 12 }, loadingText: { color: colors.muted, fontSize: 12 }, emptyWelcome: { alignItems: 'center', paddingHorizontal: 16, paddingTop: 36, paddingBottom: 29 }, emptyIllustration: { width: 106, height: 106, backgroundColor: '#e6f3e9', borderRadius: 36, justifyContent: 'center', alignItems: 'center', transform: [{ rotate: '-4deg' }] }, emptyEmoji: { color: colors.green700, fontSize: 49, fontWeight: '300', transform: [{ rotate: '4deg' }] }, emptySun: { width: 14, height: 14, borderRadius: 9, backgroundColor: '#aedfc1', position: 'absolute', top: 17, right: 17 }, emptyTitle: { color: colors.ink, fontSize: 16, fontWeight: '800', marginTop: 20 }, emptyText: { color: colors.muted, fontSize: 12, textAlign: 'center', lineHeight: 19, marginTop: 7, maxWidth: 275 }, scheduleHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 26, marginBottom: 15 }, scheduleTitle: { color: colors.ink, fontSize: 19, fontWeight: '900', marginTop: 4 }, scheduleSub: { color: colors.muted, fontSize: 11, marginTop: 3 }, calendarIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: '#e4f3e9', alignItems: 'center', justifyContent: 'center' }, calendarGlyph: { color: colors.green700, fontSize: 21 }, dayRow: { gap: 8, paddingBottom: 14 }, dayChip: { minWidth: 55, paddingVertical: 8, paddingHorizontal: 10, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 5, borderRadius: 12, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border }, dayChipActive: { backgroundColor: colors.green800, borderColor: colors.green800 }, dayText: { color: '#53635a', fontSize: 10, fontWeight: '700' }, dayTextActive: { color: colors.white }, dayNumber: { color: colors.green700, backgroundColor: '#e4f3e9', fontSize: 9, fontWeight: '900', overflow: 'hidden', textAlign: 'center', borderRadius: 10, minWidth: 16, paddingVertical: 2 }, dayNumberActive: { color: colors.green900, backgroundColor: '#c6f1dc' }, classRow: { flexDirection: 'row', marginBottom: 12 }, timeColumn: { width: 59, alignItems: 'flex-start', paddingTop: 12 }, timeStart: { color: colors.ink, fontSize: 12, fontWeight: '900' }, timeLine: { width: 1, height: 8, marginVertical: 3, backgroundColor: '#b9c9bf', marginLeft: 2 }, timeEnd: { color: colors.muted, fontSize: 10, fontWeight: '600' }, periodLabel: { color: colors.green700, fontSize: 7, fontWeight: '900', marginTop: 6, letterSpacing: 0.6 }, classStack: { flex: 1, gap: 7 }, classCard: { backgroundColor: colors.white, borderRadius: 15, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 13, paddingVertical: 11, borderLeftWidth: 3, borderLeftColor: colors.green600 }, classCardTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 }, subjectDot: { width: 7, height: 7, backgroundColor: colors.green600, borderRadius: 5, marginRight: 7 }, subjectName: { color: colors.ink, flex: 1, fontSize: 12, fontWeight: '900' }, classMeta: { color: '#617169', fontSize: 10, marginTop: 3, lineHeight: 15 }, emptyDay: { alignItems: 'center', padding: 27, backgroundColor: colors.white, borderRadius: 16, borderWidth: 1, borderColor: colors.border, marginTop: 3 }, emptyDayIcon: { color: colors.green600, fontSize: 24 }, emptyDayTitle: { color: colors.ink, fontSize: 14, fontWeight: '800', marginTop: 8 }, emptyDayText: { color: colors.muted, fontSize: 11, textAlign: 'center', marginTop: 4 }, noticeCard: { backgroundColor: colors.white, borderRadius: 18, borderWidth: 1, borderColor: colors.border, padding: 20, alignItems: 'center', marginTop: 18 }, noticeIcon: { color: colors.green700, fontSize: 29 }, noticeTitle: { color: colors.ink, fontSize: 16, fontWeight: '800', marginTop: 9 }, noticeText: { color: colors.muted, textAlign: 'center', fontSize: 12, lineHeight: 18, marginTop: 7 }, retryButton: { backgroundColor: colors.green800, paddingHorizontal: 17, paddingVertical: 10, borderRadius: 11, marginTop: 15 }, retryText: { color: colors.white, fontSize: 11, fontWeight: '800' }, footer: { alignItems: 'center', paddingTop: 24, paddingBottom: 12, borderTopWidth: 1, borderColor: '#e7ece8', marginTop: 20 }, footerMark: { color: colors.green800, fontSize: 11, fontWeight: '900', letterSpacing: 1.5 }, footerText: { color: '#7b8981', fontSize: 9, marginTop: 4 }, footerCampus: { color: '#97a39c', fontSize: 8, marginTop: 3 }, privacyLink: { marginTop: 12, paddingVertical: 6 }, privacyLinkText: { color: colors.green700, fontSize: 11, fontWeight: '700', textDecorationLine: 'underline' }, modalBackdrop: { flex: 1, backgroundColor: 'rgba(4,22,16,0.48)', justifyContent: 'flex-end' }, sheet: { maxHeight: '82%', backgroundColor: colors.canvas, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 20, paddingTop: 11, paddingBottom: 26 }, sheetHandle: { width: 37, height: 4, borderRadius: 4, backgroundColor: '#cbd5ce', alignSelf: 'center', marginBottom: 18 }, sheetTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 13 }, sheetTitle: { color: colors.ink, fontSize: 19, fontWeight: '900', marginTop: 4 }, closeButton: { width: 34, height: 34, borderRadius: 12, backgroundColor: '#e7eee8', alignItems: 'center', justifyContent: 'center' }, closeText: { color: '#4a5a50', fontSize: 24, lineHeight: 26 }, searchInput: { backgroundColor: colors.white, borderRadius: 13, paddingHorizontal: 13, paddingVertical: 11, color: colors.ink, fontSize: 12, borderWidth: 1, borderColor: colors.border, marginBottom: 9 }, optionRow: { minHeight: 57, paddingVertical: 10, borderBottomWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center' }, optionCopy: { flex: 1 }, optionTitle: { color: colors.ink, fontSize: 13, fontWeight: '800' }, optionDetail: { color: colors.muted, fontSize: 10, marginTop: 3 }, optionArrow: { color: colors.green700, fontSize: 24, paddingHorizontal: 7 }, listEmpty: { color: colors.muted, fontSize: 12, textAlign: 'center', padding: 25 },
+  safe: { flex: 1, backgroundColor: colors.canvas }, header: { backgroundColor: colors.green950, paddingHorizontal: 22, paddingTop: 14, paddingBottom: 15, borderBottomLeftRadius: 26, borderBottomRightRadius: 26 }, brandLine: { flexDirection: 'row', alignItems: 'center' }, brandMark: { width: 38, height: 38, borderRadius: 13, backgroundColor: '#c6f1dc', alignItems: 'center', justifyContent: 'center' }, brandMarkText: { color: colors.green900, fontSize: 21, fontWeight: '900' }, brandCopy: { marginLeft: 10, flex: 1 }, brandTitle: { color: colors.white, fontSize: 14, fontWeight: '900', letterSpacing: 1.4 }, brandSubtitle: { color: '#a6c8b9', fontSize: 9, fontWeight: '700', letterSpacing: 1.1, marginTop: 2 }, liveBadge: { borderColor: '#3e6959', borderWidth: 1, borderRadius: 20, paddingVertical: 6, paddingHorizontal: 9, flexDirection: 'row', alignItems: 'center', gap: 5 }, liveDot: { width: 6, height: 6, borderRadius: 4, backgroundColor: '#71e0a8' }, liveText: { color: '#c7ead8', fontSize: 8, fontWeight: '800', letterSpacing: 0.8 }, headerHeading: { marginTop: 25, color: colors.white, fontSize: 25, fontWeight: '800', letterSpacing: -0.6 }, headerDescription: { marginTop: 5, color: '#b2cfc1', fontSize: 12 }, versionButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 14, backgroundColor: '#174637', borderWidth: 1, borderColor: '#2b604e' }, versionLabel: { color: '#8fbaa6', fontSize: 8, fontWeight: '800', letterSpacing: 1.1 }, versionName: { color: colors.white, fontSize: 12, fontWeight: '700', marginTop: 4 }, chevron: { color: '#a9cfbb', fontSize: 20 }, content: { flex: 1 }, contentInner: { paddingHorizontal: 20, paddingTop: 11, paddingBottom: 22 }, sectionHeadingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, eyebrow: { color: colors.green700, fontSize: 9, fontWeight: '900', letterSpacing: 1.2 }, sectionTitle: { color: colors.ink, fontSize: 19, fontWeight: '800', marginTop: 4 }, classCount: { alignItems: 'center', minWidth: 48, paddingVertical: 6, paddingHorizontal: 9, backgroundColor: '#e4f3e9', borderRadius: 12 }, classCountNumber: { color: colors.green800, fontSize: 15, fontWeight: '900' }, classCountLabel: { color: colors.green700, fontSize: 7, fontWeight: '800', letterSpacing: 0.8 }, filterRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 11 }, filterChip: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 22, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border }, filterChipActive: { backgroundColor: colors.green800, borderColor: colors.green800 }, filterText: { color: '#617169', fontSize: 11, fontWeight: '700' }, filterTextActive: { color: colors.white }, selectButton: { backgroundColor: colors.white, marginTop: 8, padding: 10, borderRadius: 16, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center' }, selectIcon: { width: 39, height: 39, backgroundColor: '#e8f5ec', borderRadius: 12, justifyContent: 'center', alignItems: 'center' }, selectIconText: { color: colors.green700, fontSize: 20, fontWeight: '800' }, selectCopy: { flex: 1, marginLeft: 11 }, selectLabel: { color: colors.muted, fontSize: 8, fontWeight: '800', letterSpacing: 0.8 }, selectValue: { color: colors.ink, fontSize: 13, fontWeight: '800', marginTop: 4 }, selectPlaceholder: { color: '#87958e', fontWeight: '600' }, selectChevron: { color: colors.green700, fontSize: 20, paddingHorizontal: 3 }, loading: { alignItems: 'center', paddingVertical: 50, gap: 12 }, loadingText: { color: colors.muted, fontSize: 12 }, emptyWelcome: { alignItems: 'center', paddingHorizontal: 16, paddingTop: 36, paddingBottom: 29 }, emptyIllustration: { width: 106, height: 106, backgroundColor: '#e6f3e9', borderRadius: 36, justifyContent: 'center', alignItems: 'center', transform: [{ rotate: '-4deg' }] }, emptyEmoji: { color: colors.green700, fontSize: 49, fontWeight: '300', transform: [{ rotate: '4deg' }] }, emptySun: { width: 14, height: 14, borderRadius: 9, backgroundColor: '#aedfc1', position: 'absolute', top: 17, right: 17 }, emptyTitle: { color: colors.ink, fontSize: 16, fontWeight: '800', marginTop: 20 }, emptyText: { color: colors.muted, fontSize: 12, textAlign: 'center', lineHeight: 19, marginTop: 7, maxWidth: 275 }, scheduleHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 18, marginBottom: 10 }, scheduleTitle: { color: colors.ink, fontSize: 19, fontWeight: '900', marginTop: 4 }, scheduleSub: { color: colors.muted, fontSize: 11, marginTop: 3 }, calendarIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: '#e4f3e9', alignItems: 'center', justifyContent: 'center' }, calendarGlyph: { color: colors.green700, fontSize: 21 }, dayRow: { gap: 8, paddingBottom: 14 }, dayChip: { minWidth: 55, paddingVertical: 8, paddingHorizontal: 10, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 5, borderRadius: 12, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border }, dayChipActive: { backgroundColor: colors.green800, borderColor: colors.green800 }, dayText: { color: '#53635a', fontSize: 10, fontWeight: '700' }, dayTextActive: { color: colors.white }, dayNumber: { color: colors.green700, backgroundColor: '#e4f3e9', fontSize: 9, fontWeight: '900', overflow: 'hidden', textAlign: 'center', borderRadius: 10, minWidth: 16, paddingVertical: 2 }, dayNumberActive: { color: colors.green900, backgroundColor: '#c6f1dc' }, classRow: { flexDirection: 'row', marginBottom: 9 }, timeColumn: { width: 59, alignItems: 'flex-start', paddingTop: 12 }, timeStart: { color: colors.ink, fontSize: 12, fontWeight: '900' }, timeLine: { width: 1, height: 8, marginVertical: 3, backgroundColor: '#b9c9bf', marginLeft: 2 }, timeEnd: { color: colors.muted, fontSize: 10, fontWeight: '600' }, periodLabel: { color: colors.green700, fontSize: 7, fontWeight: '900', marginTop: 6, letterSpacing: 0.6 }, classStack: { flex: 1, gap: 5 }, classCard: { backgroundColor: colors.white, borderRadius: 15, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 9, borderLeftWidth: 3, borderLeftColor: colors.green600 }, classCardTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 }, subjectDot: { width: 7, height: 7, backgroundColor: colors.green600, borderRadius: 5, marginRight: 7 }, subjectName: { color: colors.ink, flex: 1, fontSize: 12, fontWeight: '900' }, classMetaRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'baseline', columnGap: 4 }, classModuleInline: { color: '#8a4b08', fontSize: 9, fontWeight: '900', marginTop: 3, lineHeight: 15 }, classMeta: { color: '#617169', fontSize: 10, marginTop: 3, lineHeight: 15 }, emptyDay: { alignItems: 'center', padding: 27, backgroundColor: colors.white, borderRadius: 16, borderWidth: 1, borderColor: colors.border, marginTop: 3 }, emptyDayIcon: { color: colors.green600, fontSize: 24 }, emptyDayTitle: { color: colors.ink, fontSize: 14, fontWeight: '800', marginTop: 8 }, emptyDayText: { color: colors.muted, fontSize: 11, textAlign: 'center', marginTop: 4 }, noticeCard: { backgroundColor: colors.white, borderRadius: 18, borderWidth: 1, borderColor: colors.border, padding: 20, alignItems: 'center', marginTop: 18 }, noticeIcon: { color: colors.green700, fontSize: 29 }, noticeTitle: { color: colors.ink, fontSize: 16, fontWeight: '800', marginTop: 9 }, noticeText: { color: colors.muted, textAlign: 'center', fontSize: 12, lineHeight: 18, marginTop: 7 }, retryButton: { backgroundColor: colors.green800, paddingHorizontal: 17, paddingVertical: 10, borderRadius: 11, marginTop: 15 }, retryText: { color: colors.white, fontSize: 11, fontWeight: '800' }, footer: { alignItems: 'center', paddingTop: 24, paddingBottom: 12, borderTopWidth: 1, borderColor: '#e7ece8', marginTop: 20 }, footerMark: { color: colors.green800, fontSize: 11, fontWeight: '900', letterSpacing: 1.5 }, footerText: { color: '#7b8981', fontSize: 9, marginTop: 4 }, footerCampus: { color: '#97a39c', fontSize: 8, marginTop: 3 }, privacyLink: { marginTop: 12, paddingVertical: 6 }, privacyLinkText: { color: colors.green700, fontSize: 11, fontWeight: '700', textDecorationLine: 'underline' }, modalBackdrop: { flex: 1, backgroundColor: 'rgba(4,22,16,0.48)', justifyContent: 'flex-end' }, sheet: { maxHeight: '82%', backgroundColor: colors.canvas, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 20, paddingTop: 11, paddingBottom: 26 }, sheetHandle: { width: 37, height: 4, borderRadius: 4, backgroundColor: '#cbd5ce', alignSelf: 'center', marginBottom: 18 }, sheetTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 13 }, sheetTitle: { color: colors.ink, fontSize: 19, fontWeight: '900', marginTop: 4 }, closeButton: { width: 34, height: 34, borderRadius: 12, backgroundColor: '#e7eee8', alignItems: 'center', justifyContent: 'center' }, closeText: { color: '#4a5a50', fontSize: 24, lineHeight: 26 }, searchInput: { backgroundColor: colors.white, borderRadius: 13, paddingHorizontal: 13, paddingVertical: 11, color: colors.ink, fontSize: 12, borderWidth: 1, borderColor: colors.border, marginBottom: 9 }, optionRow: { minHeight: 57, paddingVertical: 10, borderBottomWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center' }, optionCopy: { flex: 1 }, optionTitle: { color: colors.ink, fontSize: 13, fontWeight: '800' }, optionDetail: { color: colors.muted, fontSize: 10, marginTop: 3 }, optionArrow: { color: colors.green700, fontSize: 24, paddingHorizontal: 7 }, listEmpty: { color: colors.muted, fontSize: 12, textAlign: 'center', padding: 25 }, moduleChip: { minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 4, marginLeft: 'auto', paddingHorizontal: 8, paddingVertical: 5, borderRadius: 18, backgroundColor: '#e8f5ec', borderWidth: 1, borderColor: '#d5e7db' }, moduleChipLabel: { color: colors.green700, fontSize: 7, fontWeight: '900', letterSpacing: 0.5 }, moduleChipValue: { color: colors.green800, fontSize: 9, fontWeight: '800', maxWidth: 38 }, moduleChipChevron: { color: colors.green700, fontSize: 13, marginLeft: 1 },
   pdfButton: { alignSelf: 'flex-end', flexDirection: 'row', alignItems: 'center', gap: 7, borderRadius: 11, borderWidth: 1, borderColor: '#cde2d3', backgroundColor: '#edf7ef', paddingHorizontal: 11, paddingVertical: 8, marginBottom: 12 },
   pdfButtonBusy: { opacity: 0.65 },
   pdfGlyph: { color: colors.green700, fontSize: 15, fontWeight: '900' },
   pdfButtonText: { color: colors.green800, fontSize: 9, fontWeight: '800' },
+  classModule: { color: '#8a4b08', fontSize: 9, fontWeight: '900', marginBottom: 3 },
+  previewBanner: { backgroundColor: '#fff8e8', borderColor: '#e6ad3c', borderWidth: 1.5, borderRadius: 14, padding: 13, marginBottom: 14, gap: 10 },
+  previewCopy: { gap: 4 },
+  previewTitle: { color: '#8a4b08', fontSize: 11, fontWeight: '900' },
+  previewText: { color: '#74410a', fontSize: 11, fontWeight: '700' },
+  previewButton: { alignSelf: 'flex-start', backgroundColor: colors.green800, borderRadius: 9, paddingHorizontal: 12, paddingVertical: 9 },
+  previewButtonText: { color: colors.white, fontSize: 10, fontWeight: '900' },
   quickEyebrow: { fontSize: 13, letterSpacing: 1.4 },
 });
